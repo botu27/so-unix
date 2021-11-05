@@ -1,0 +1,1 @@
+int moltiplica(int x, int y);
