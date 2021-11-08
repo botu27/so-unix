@@ -1,0 +1,8 @@
+app: moltiplicazione.o somma.o app.o
+	gcc *.o -o app
+clean:
+	rm -f *.o
+cleanApp:
+	rm app
+run:
+	./app
