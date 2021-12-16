@@ -1,0 +1,12 @@
+Memorie condivise:
+-Permette a due o piu' processi di condividere la stessa area di memoria
+-Una volta copiati i dati in essa, sono resi immediatamente disponibili 
+a tutti gli altri processi che condividono la stessa area di memoria
+-E' una IPC veloce rispetto alle PIPE o code di messaggi
+-L'accesso non e' gestito dal Kernel --> necessita di sicronizzazione(SEMAFORI)
+-Ogni processo usa il segmento di SM come se fosse una normale
+porzione del proprio spazio di indirizi logici, che pero' fisicamente condiviso
+in comune a piu' processi
+-Un figlio creato da fork eredita i segmenti di SM, strumento molto semplice
+-Durante una exec(), tutti i segmenti attaccati sono staccati, ma non distrutti
+-I segmenti sono automaticamente staccati al momento della terminazione dei processi

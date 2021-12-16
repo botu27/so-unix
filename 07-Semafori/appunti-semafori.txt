@@ -1,0 +1,11 @@
+I semafori non servono a trasferire i dati fra processi,
+bensi' servono a sincronizzare le proprie azioni(accesso a un blocco di memoria condivisa etc.).
+Un semaforo e' un intero mantenuto dal kernel il cui valore e' sempre >= 0.
+Il suo valore regola l'accesso alla risorsa protetta dal semaforo stesso.
+Le operazioni consentite su un semaforo sono:
+* Inizializzare il valore del semaforo;
+* Usare la risorsa condivisa decrementando il valore del semaforo, se e' == 0, il processo
+che richiede la risorsa resta bloccato finche' valore del semaforo diventi >0, poi decrementa il semaforo.
+* Incrementare il semaforo, quando la risorsa viene rilasciata
+* Attendere fino a che il valore del semaforo non diventa > 0.
+NB: I semafori di System V sono rsi complessi dal fatto di essere allocati in gruppi detti set di semafori.

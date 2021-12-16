@@ -1,0 +1,55 @@
+Con controllo dei proc. si indica un insieme di operazioni che include la creaz., l'esec. e la termin. di processi
+Rispettivamente corrispondono le seg. sys. calls : fork, exit, wait, waitpid execve
+FORK() - permette la creazione di un processo, ovvero creare da un processo padre processo figlio.
+Il figlio è una copia wuasi esatta del padre: ottiene copie di stack, data, heap e text segments del padre.
+EXIT(status) - termina un processo, rendendo le risorse utilizzate dal proc. (memoria, descrittori dei file aperti...) nuovamente dispon. per essere allocate dal kernel.
+Argomento status - e' un intero che descrive lo stato di terminazione del processo: utilizzando la sys. call wait() il proc. padre puo' risalire al tale status.
+WAIT(&status) - ha due fini: se un figlio non ha ancora concluso la propria esec. chiamando una exit(), la wait() sospende il proc. chiamante finche' uno dei suoi figli non ha terminato la propria esec.
+Dopo la terminazione di un figlio, lo stato di temrinazione del figlio e' restituito nell'argoemnto status dalla wait.
+EXECVE(pathname, argv, envp) - carica un nuovo programma(pathname con relativa lista degli argomenti e l'enviroment env) nella memoria del processo.
+Il testo del prog precedente e' cancellato e stack, dati e heap sono creati per il nuovo programma.
+EXIT(status --- best practice utilizzare macro) - quando un proc. termina, tutti gli stream sono svuotati e chiusi, un segnale SIGCHILD viene mandato al processo padre,
+ogni figlio del processo padre appena terminato viene assegnato ad un nuovo padre, il processo init. Le risorse(memoria, descrittori di file aperti) vengono rilasciati.
+Il vslore di stato d'uscita viene memorizzato, troncando a 8 bit. Le funz. registrate con la funz. atexit() vengono eseguite in maniera inversa rispetto alla registrazione.
+Un processo puo' essere terminato da:
+    La system call exit(status)
+    Attraverso un segnale, ad esempio CTR+C, in questo caso le funzioni registrate non vengono eseguite.
+Il valore di ritorno puo' essere tra 0 e 255.
+Per convenzione: 0 - trerminazione avvenuta normalmente, diverso da 0 altrimenti
+_exit() < exit():
+    invocando exit() vengono invocate anche le funzioni registrate con atexit() oppure on_exit(),
+    il buffer dello stream vienen svuotato
+    la funzione _exit() vienen richiamata con paramentro STATUS passato come argomento
+
+MONITORAGGIO DEI PROCESSI:
+System Call - WAIT(*status) ritorna process ID del filgio che ha terminato la sua esecuzione, oppure -1 - errore.
+Questa sc e' bloccante, se un un figlio ha gia' terminato al momento della chiamata, wait() restituisce immediatamanete.
+Se status non e' NULL, allora contienen le info sulla terminazione del figlio.
+Un possibile errore e' che il chiamante non abbia i fligli, il che e' indicato dal valore ECHILD di errno.
+Non e' invece possibile avere informazioni sui filgi che siano stato bloccati da un segnale, ad esmpio SIGSTOP,
+o quanto risvegliato da un SIGCONT.
+SOLUZIONE: WAITPID(PID, &STATUS, OPTIONS)
+PID:
+    >0 : attenti per il figlio con quel PID
+    == 0: attendi per qualsiasi filgio nello stesso gruppo dei processi del chiamante padre.
+    < -1: attendi per qualsiasi figlio il ciui process group e' uguale al valore assoluto di PID
+    == -1: attendi per un figlio qualsiasi, equivalente a wait(&status).
+OPTIONS:
+    e' una bitmask che puo' contenere i seguenti flag
+    WUNTRACED: oltre a restituire info quando un figlio termina, restituisci 
+    informazioni quando il figlio viene bloccato da un segnale
+    WCONTINUED: restituisci informazioni anche nel caso il figlio sia stopped e 
+    venga risvegliato da un segnale SIGCONT
+    WNOHANG: se nessun figlio specificato da pid ha cambiato stato, restituisci 
+    immediatamente, invece di bloccare il chiamante.  In questo caso, il valore di 
+    ritorno di waitpid() è 0. Se il processo chiamante non ha figli con il pid
+    richiesto, waitpid() fallisce con l'errore ECHILD
+STATUS:
+    il valore permete di distinguere tra i seguenti casi:
+    il figlio ha terminato l'esecuzione chiamando _exit() (o exit()), specificando un 
+    codice d'uscita (exit status) intero.
+    il figlio ha terminato l'esecuzione per la ricezione di un segnale non gestito
+    il figlio è stato bloccato da un segnale, e waitpid() è stata chiamata con il flag
+    WUNTRACED
+    Il figlio ha ripreso l'esecuzione per un segnale SIGCONT, e waitpid() è stata 
+    chiamata con il flag WCONTINUED

@@ -1,0 +1,5 @@
+Code di messaggi:
+Utilizzate per scambiare i messaggi fra processi. Simili alle pipe ma differiscono per due aspetti:
+    I confini dei messaggi sono delimitati: si comunica in unità di messaggi, e non in stream di byte.
+    Ciascun messaggio contiene unmembro type di tipo intero, ed è possibile selezione i messaggi per tipo, ma anche leggerli in ordine in cui ci sono stati scritti.
+    

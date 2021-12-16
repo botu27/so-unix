@@ -1,0 +1,15 @@
+{
+    "files.associations": {
+        "*.c": "c",
+        "sem.h": "c",
+        "stdio.h": "c",
+        "time.h": "c",
+        "features.h": "c",
+        "types.h": "c",
+        "stat.h": "c",
+        "ipc.h": "c",
+        "stdlib.h": "c",
+        "sem_utils.h": "c",
+        "bin_sem_head.h": "c"
+    }
+}

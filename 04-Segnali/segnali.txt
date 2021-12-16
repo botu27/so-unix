@@ -1,0 +1,36 @@
+SEGNALE - e' una notifica a un processo che e' occorso un certo evento.
+Eventi casuatrici:
+    Eccezione HW - DIV by 0 per es.
+    Evento SW - timer arrivato a 0,  file disponibile ...
+I segnali sono tipicamente dei interi che partono dal valore 1
+Tali interi sono definiti nell'header file <signal.h>
+In base al segnale, SO intraprende diverse azioni: terminazione del processo(SIGINT), stop process(SIGSTOP), lo stato del figlio e' cambiato(SIGCHLD) ...
+comando kill - invia un segnale al processo
+Ciclo di vita dei signali:
+    Un segnale e' generato da un evento
+    Un segnale e' inviato ad un processo
+    Fra il momento in cui è generato e il momento in cui è inviato al 
+    processo, il segnale è pendente (pending)
+NB: Maschera dei segnali del processo - un insieme di segnali la cui ricezoni e' attualmente bloccata.
+Al momento della ricezione del segnale, vi sono seguenti comportamenti:
+    Il segnale è ignorato
+    Il processo viene terminato
+    È generato un file contenente un core dump file, e il processo viene 
+    terminato
+    Il processo viene bloccato
+    L'esecuzione del processo è ripresa
+Le TRAP:
+    Una classe di segnali sono le trap: segnali generati da eventi prodotti 
+    da un processo e inviati al processo stesso, che normalmente 
+    reagisce terminando.
+Gli INTERRPUT:
+    Gli interrupt sono segnali inviati ad un processo da un agente 
+    esterno: l’utente o un altro processo
+Signal HEADERS
+    Un signal handler (o gestore di segnali) è una funzione, scritta dal 
+    programmatore, che esegue azioni appropriate in risposta alla 
+    ricezione di un segnale.
+Primitive in C per gestire i segnali:
+-> signal() - semplice
+-> sigaction()
+    Permettono di impostare gli handler per seganli passati come argomento
