@@ -50,7 +50,16 @@ typedef struct transazione_tp
     transazione transazione;
 } transazione_tp;
 
-struct msgbuf
+#define UTENTE_OK 1
+#define UTENTE_KO 0
+
+typedef struct utente
+{
+    int stato;
+    int pid;
+} utente;
+
+struct mymsgbuf
 {
     long mtype;
     transazione body;
@@ -85,13 +94,17 @@ int SO_FRIENDS_NUM;
 /*Inizializza le variabili globali da un file di input TXT. */
 int read_all_parameters();
 void alarmHandler(int);
-int getRandomUser(int, int, int *);
+int getRandomUser(int, int, utente *);
+int getRandomMqId(int, int *);
 int getMyBilancio(int, transazione *, int *, int);
 void initDummyTransactionPool(transazione_tp *, int);
 int isFull(transazione_tp *, int);
 int getNextIndex(transazione_tp *, int);
 void attesaNonAttiva(struct timespec *, struct timespec *, long, long);
 void marcaTransazioni(transazione_tp *, transazione *, int, int);
+int getRandomQuantita(int, int);
+int getReward(int, int);
+void sigusr1Handler(int);
 
 int main()
 {
@@ -111,7 +124,7 @@ int main()
     /**********************************/
     /*PUNTATORI ALLE STRUTTURE CONTENUTE ALL'INTERNO DELLE MEMORIE CONDIVISE*/
     int *shmArrayNodeMsgQueuePtr;
-    int *shmArrayUsersPidPtr;
+    utente *shmArrayUsersPidPtr;
     int *shmIndiceBloccoPtr;
     transazione *shmLibroMastroPtr;
     /************************************************************************/
@@ -140,18 +153,31 @@ int main()
     /*STRUTTURE RELATIVE AI NODI*/
     transazione_tp *transactionPool;
     transazione *blocco;
+    int *arrayNodesPidPtr;
     int nextTransactionPoolIndex; /*contiene il prossimo indice valido*/
     int nextBloccoIndex;          /*contiene il prossimo indice valido*/
-    struct msgbuf msgbuf;         /*buffer dove salvare i dati ricevuti dalla coda di messaggi*/
+    struct mymsgbuf msgbuf;         /*buffer dove salvare i dati ricevuti dalla coda di messaggi*/
     int bI;
     int isTransactionPoolFull;
     transazione transazioneReward; /*ultimo campo del blocco da salvare nel registro*/
     int rewardNodo;
-    struct timespec timeToSleep;
+    struct timespec timeToSleep;    /*attenzione va condivisa*/
     struct timespec remainedTimeToSleep;
     struct sigaction sigactionForNode;
     sigset_t maskSetForNode;
     /****************************/
+    /*STRUTTURE RELATIVE AGLI UTENTI*/
+    int indice; /*punta al successivo record da verificare*/
+    int bilancio; /*bilancio dell'utente*/
+    int soRetry;
+    int pidRandUser; /*pid del destinatario scelto casualmente*/
+    int quantita; /*quantita del denaro da inviare*/
+    int reward; /*reward da pagare al nodo*/
+    int idRandMsgQueue; /*l'id della coda dove mandare il messaggio*/
+    struct sigaction sigactionForSigusr1New;
+    struct sigaction sigactionForSigusr1Old;
+    sigset_t maskSetForSigusr1;
+    /********************************/
     /*VARIABILI AUSILIARI*/
     int i;
     int childPid;
@@ -219,7 +245,7 @@ int main()
     for (i = 0; i < SO_NODES_NUM; i++)
     {
         msgQueueId = msgget(IPC_PRIVATE, 0600 | IPC_CREAT);
-        *(shmArrayNodeMsgQueuePtr + i) = msgQueueId;
+        shmArrayNodeMsgQueuePtr[i] = msgQueueId;
     }
 
 /* SOLO PER TEST */
@@ -261,8 +287,11 @@ int main()
 #endif
 
     /*inizializzazione memoria condivisa array PID processi utente*/
-    shmIdUtente = shmget(IPC_PRIVATE, SO_USERS_NUM * sizeof(int), 0600 | IPC_CREAT);
-    shmArrayUsersPidPtr = (int *)shmat(shmIdUtente, NULL, 0);
+    shmIdUtente = shmget(IPC_PRIVATE, SO_USERS_NUM * sizeof(utente), 0600 | IPC_CREAT);
+    shmArrayUsersPidPtr = (utente *)shmat(shmIdUtente, NULL, 0);
+
+    /*inizializzazione array PID processi nodo*/
+    arrayNodesPidPtr = (int *)calloc(SO_NODES_NUM, sizeof(int));
 
     /*inizializzazione semaforo per garantire l'accesso alla memoria - TODO*/
 
@@ -275,7 +304,7 @@ int main()
     semSyncStartId = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
     TEST_ERROR
 #if (ENABLE_TEST)
-    printf("ID del semaforo di sincronizzazione dei processi -> %d", semSyncStartId);
+    printf("ID del semaforo di sincronizzazione dei processi -> %d\n", semSyncStartId);
 #endif
     sops.sem_flg = 0; /*no flags*/
     sops.sem_num = 0; /*primo semaforo nel set*/
@@ -309,9 +338,16 @@ int main()
             semop(semSyncStartId, &sops, 1);
             TEST_ERROR
 
+            /*imposto la sigaction*/
+            sigactionForSigusr1New.sa_flags = 0;
+            sigemptyset(&maskSetForNode);
+            sigactionForSigusr1New.sa_mask = maskSetForNode;
+            sigactionForSigusr1New.sa_handler = sigusr1Handler;
+            sigaction(SIGUSR1, &sigactionForSigusr1New, &sigactionForSigusr1Old);
+
             /*Qui posso effetivante iniziare la propria parte*/
             /*effettuo l'attach al libro mastro*/
-            shmLibroMastroPtr = (transazione *)shmat(shmIdMastro, NULL, 0);
+            /*shmLibroMastroPtr = (transazione *)shmat(shmIdMastro, NULL, 0);*/ /*commentato perche' penso che PTR sia condiviso*/
             /*Creo la transaction pool*/
             transactionPool = calloc(SO_TP_SIZE, sizeof(transazione_tp));
             /*Prima cella utile e' la 0-esima*/
@@ -331,9 +367,13 @@ int main()
             /*Caso migliore - NODO e' sempre disponibile per gestire le transazioni*/
             while (1)
             {
+                sleep(1);
                 /*Pesco primo messaggio dalla coda, se la coda e' vuota - ritorna con errno settato*/
-                msgrcv(*(shmArrayNodeMsgQueuePtr + i), &msgbuf, sizeof(transazione_tp), 0, IPC_NOWAIT);
-                if (errno == EAGAIN)
+                printf("TP ha ancora %d celle disponibili!\n", semctl(semSetMsgQueueId, i, GETVAL));
+                printf("Sono nodo %d-iesimo!\nFaccio la msgrcv NOWAIT dalla coda %d\n", i, shmArrayNodeMsgQueuePtr[i]);
+                printf("Sono nodo %d e ho fatto la rcv dalla coda con l'esito %ld\n", getpid(), msgrcv(shmArrayNodeMsgQueuePtr[i], &msgbuf, sizeof(msgbuf.body), 0, IPC_NOWAIT));
+                TEST_ERROR
+                if (errno == ENOMSG)
                 {
                     /*Caso della coda vuota*/
                     /*DO NOTHING - da ripensare*/
@@ -360,17 +400,19 @@ int main()
                     /*TP e' piena*/
                     else
                     {
-                        /*registro la transazione da memoriazzare nel libro mastro*/
-                        blocco[bI] = transactionPool[nextBloccoIndex].transazione;
-                        /*aggiorno il campo di quantita'*/
-                        transazioneReward.quantita = transactionPool[nextBloccoIndex].transazione.reward;
-                        /*punto alla successiva cella occupata da gestire, se sono qua alloa la TP e' piena*/
-                        nextBloccoIndex++;
-                        if (nextBloccoIndex == SO_TP_SIZE)
+                        for(bI = 0; bI < SO_BLOCK_SIZE - 1; bI++)
                         {
-                            nextBloccoIndex = 0;
+                            /*registro la transazione da memoriazzare nel libro mastro*/
+                            blocco[bI] = transactionPool[nextBloccoIndex].transazione;
+                            /*aggiorno il campo di quantita'*/
+                            transazioneReward.quantita = transactionPool[nextBloccoIndex].transazione.reward;
+                            /*punto alla successiva cella occupata da gestire, se sono qua alloa la TP e' piena*/
+                            nextBloccoIndex++;
+                            if (nextBloccoIndex == SO_TP_SIZE)
+                            {
+                                nextBloccoIndex = 0;
+                            }
                         }
-                        bI++;
                         /*blocco pronto da inviare*/
                         if (bI == SO_BLOCK_SIZE - 1)
                         {
@@ -386,10 +428,9 @@ int main()
 
                             /*Effettuto l'operazione di scrittura sul libro mastro*/
                             /*effettuo l'attach al indice blocco del libro mastro*/
-                            shmIndiceBloccoPtr = (transazione *)shmat(shmIdIndiceBlocco, NULL, 0);
+                            shmIndiceBloccoPtr = (int *)shmat(shmIdIndiceBlocco, NULL, 0);
                             TEST_ERROR;
-                            bI = 0;
-                            for (bI; bI < SO_BLOCK_SIZE; bI++)
+                            for (bI = 0; bI < SO_BLOCK_SIZE; bI++)
                             {
                                 shmLibroMastroPtr[*(shmIndiceBloccoPtr)*SO_BLOCK_SIZE + bI] = blocco[bI];
                             }
@@ -412,6 +453,7 @@ int main()
 
                             /*incremento l'indice*/
                             *(shmIndiceBloccoPtr) += 1;
+                            printf("----------------------%d------------------------\n", *(shmIndiceBloccoPtr));
                             /*verifico eventuale riempimento del registro*/
                             if (*(shmIndiceBloccoPtr) == SO_REGISTRY_SIZE)
                             {
@@ -427,6 +469,12 @@ int main()
 
                             bI = 0;
 
+                            /*incremento il valore del flag della propria MQ*/
+                            sops.sem_flg = 0;
+                            sops.sem_num = i;
+                            sops.sem_op = SO_BLOCK_SIZE;
+                            printf("%d ho appena registrato %d messaggi e aggiorno il semaforo con esito %d\n", getpid(), SO_BLOCK_SIZE, semop(semSetMsgQueueId, &sops, i));
+
                             /*Marcare le transazioni inviate*/
                             marcaTransazioni(transactionPool, blocco, SO_TP_SIZE, SO_BLOCK_SIZE);
                             /*aggiorno la cella dove andare a scrivere*/
@@ -436,11 +484,31 @@ int main()
                     }
                 }
             }
-
+            break;
         default:
+            arrayNodesPidPtr[i] = childPid;
+            printf("\t%d - PARENT, aggiungo in posizione %d-iesima, NODO %d\n", getpid(), i, arrayNodesPidPtr[i]);
             break;
         }
     }
+
+    /*devo risvegliare tutti i processi NODI*/
+    sops.sem_flg = 0;
+    sops.sem_num = 0;
+    sops.sem_op = -1;
+    semop(semSyncStartId, &sops, 1);
+    TEST_ERROR
+
+    sleep(2);
+
+    printf("*********************RISVEGLIO GLI UTENTI************************\n");
+
+    /*reinizializzo il semaforo per sincronizzare gli utenti*/
+    sops.sem_flg = 0; /*no flags*/
+    sops.sem_num = 0; /*primo semaforo nel set*/
+    sops.sem_op = SO_USERS_NUM + 1;
+    semop(semSyncStartId, &sops, 1);
+    TEST_ERROR
 
     /* creazione figli users con operazioni annesse */
     for (i = 0; i < SO_USERS_NUM; i++)
@@ -458,32 +526,98 @@ int main()
 #if (ENABLE_TEST)
             printf("sono il figio: %d, in posizione: %d\n", getpid(), i);
 #endif
+            /*Avviso processo PARENT della avvenuta creazione del figlio*/
             sops.sem_flg = 0;
             sops.sem_num = 0;
             sops.sem_op = -1;
             semop(semSyncStartId, &sops, 1);
             TEST_ERROR
+
 /* SOLO PER TEST*/
 #if (ENABLE_TEST)
             printf("%d is waiting for zero\n", i);
 #endif
+            /*mi metto in attesa di zero*/
             sops.sem_flg = 0;
             sops.sem_num = 0;
             sops.sem_op = 0;
             semop(semSyncStartId, &sops, 1);
-#if (ENABLE_TEST)
-            printf("%d sono risvegliato\n", i);
-#endif
-            printf("SONO %d e Voglio creare la transazione e inviarla al nodo : %d\n", getpid(), getRandomUser(SO_USERS_NUM, getpid(), shmArrayUsersPidPtr));
-            exit(EXIT_SUCCESS);
+
+            printf("********SVEGLIATO*********\n");
+
+            /*imposto la sigaction*/
+            sigactionForSigusr1New.sa_flags = 0;
+            sigemptyset(&sigactionForSigusr1New.sa_mask);
+            sigactionForSigusr1New.sa_handler = sigusr1Handler;
+            sigaction(SIGUSR1, &sigactionForSigusr1New, &sigactionForSigusr1Old);
+
+            /*ogni utente "parte" con lo stesso budget*/
+            bilancio = SO_BUDGET_INIT;
+
+            /*imposto soRetry*/
+            soRetry = SO_RETRY;
+
+            /*costruisco la struttura del messaggio da inviare*/
+            msgbuf.mtype = getpid();
+            msgbuf.body.sender = getpid();
+
+            while(soRetry > 0)
+            {
+                /*bilancio += getMyBilancio(getpid(), shmLibroMastroPtr, &indice, SO_REGISTRY_SIZE);*/
+                printf("Sono %d e il mio budget e' %d\n", getpid(), bilancio);
+                while(bilancio >= 2)
+                {
+                    bilancio += getMyBilancio(getpid(), shmLibroMastroPtr, &indice, SO_REGISTRY_SIZE);
+                    printf("Costruisco il body del messaggio!!!!!!!!!\n");
+                    pidRandUser = getRandomUser(SO_USERS_NUM, getpid(), shmArrayUsersPidPtr);
+                    printf("PID RANDOM %d\n", pidRandUser);
+                    quantita = getRandomQuantita(1, bilancio);
+                    printf("QUANTITA RANDOM %d\n", quantita);
+                    reward = getReward(SO_REWARD, quantita);
+                    msgbuf.body.quantita = quantita;
+                    msgbuf.body.reward = reward;
+                    msgbuf.body.receiver = pidRandUser;
+                    idRandMsgQueue = getRandomMqId(SO_NODES_NUM, shmArrayNodeMsgQueuePtr);
+                    printf("_______Random MSGQUEUE %d\n", idRandMsgQueue);
+
+                    /*tentativo di inviare al nodo scelto*/
+                    sops.sem_flg = IPC_NOWAIT;
+                    sops.sem_num = idRandMsgQueue; /*i-esimo id del semset*/
+                    sops.sem_op = -1;
+                    printf("***************Sono %d e voglio inviare alla coda %d\n", getpid(), idRandMsgQueue);
+                    semop(semSetMsgQueueId, &sops, 1);
+                    if(errno == EAGAIN){
+                        /*coda occupata*/
+                        continue;
+                    }
+                    else{
+                        /*coda non occupata*/
+                        bilancio -= quantita; /*decremento il bilancio*/
+                        clock_gettime(CLOCK_BOOTTIME, &msgbuf.body.timestamp);
+                        /*invio del messaggio*/
+                        printf("\t%d ha mandato un messaggio con risposta %d\n", getpid(), msgsnd(idRandMsgQueue, &msgbuf, sizeof(msgbuf.body), 0));
+                        TEST_ERROR;
+                        /*attesa non attiva*/
+                        attesaNonAttiva(&timeToSleep, NULL, SO_MIN_TRANS_GEN_NSEC, SO_MAX_TRANS_GEN_NSEC);
+                    }
+                }
+                soRetry--;
+                /*attendo, sperando di ricevere qualcosa nel mentre*/
+                /*attesaNonAttiva(&timeToSleep, NULL, SO_MIN_TRANS_GEN_NSEC, SO_MAX_TRANS_GEN_NSEC);*/
+                sleep(1);
+            }
+
             break;
 
         default:
             /* riempimento array PID utenti nella memoria condivisa */
-            *(shmArrayUsersPidPtr + i) = childPid;
+            shmArrayUsersPidPtr[i].pid = childPid;
+            shmArrayUsersPidPtr[i].stato = UTENTE_OK;
+            printf("Utente %d con lo stato %d\n", shmArrayUsersPidPtr[i].pid, shmArrayUsersPidPtr[i].stato);
             break;
         }
     }
+
     /* SOLO PER TEST*/
 #if (ENABLE_TEST)
     printf("Sono #%d processo PARENT e risveglio i figli!\n", getpid());
@@ -495,6 +629,21 @@ int main()
 #if (ENABLE_TEST)
     printf("Sono #%d processo PARENT e ho risvegliato i figli!\n", getpid());
 #endif
+
+    sleep(10);
+
+    for(i = 0; i < SO_USERS_NUM; i++){
+        if(shmArrayUsersPidPtr[i].stato == UTENTE_OK)
+        {
+            printf("EFFETTUA LA kill() su UTENTE %d\n", shmArrayUsersPidPtr[i].pid);
+            kill(shmArrayUsersPidPtr[i].pid, SIGUSR1);
+        }
+    }
+
+    for(i = 0; i < SO_NODES_NUM; i++){
+        printf("EFFETTUA LA kill() su NODO %d\n", arrayNodesPidPtr[i]);
+        kill(arrayNodesPidPtr[i], SIGUSR1);
+    }
 
     /*POSSIBILE IMPLEMENTAZIONE DELL'ATTESA DELLA TERMINAZIONE DEI FIGLI*/
     while ((childPidWait = waitpid(-1, &childStatus, 0)) != -1)
@@ -530,9 +679,11 @@ int main()
     for (i = 0; i < SO_USERS_NUM; i++)
     {
         printf("\nSTAMPO TUTTI GLI ID DEGLI UTENTI NELL'ARRAY CREATE\n");
-        printf("PID utente %d = %d\n", i, *(shmArrayUsersPidPtr + i));
+        printf("PID utente %d = %d\n", i, shmArrayUsersPidPtr[i].pid);
     }
 #endif
+
+    sleep(10);
 
     /*EFFETTUO LE DETACH, ALTRIMENTI LA OPERAZIONE NON AVRA' ALCUN EFFETTO*/
     shmdt(shmIndiceBloccoPtr);
@@ -696,7 +847,7 @@ Alcune assunzioni:
 1. La memoria condivisa esiste ed e' POPOLATA
 2. max rappresenta il valore di NUM_USERS che al momento della invocazione deve avere un valore valido.
 */
-int getRandomUser(int max, int myPid, int *shmArrayUsersPidPtr)
+int getRandomUser(int max, int myPid, utente *shmArrayUsersPidPtr)
 {
     int userPidId;
     srand(myPid);
@@ -704,9 +855,9 @@ int getRandomUser(int max, int myPid, int *shmArrayUsersPidPtr)
     do
     {
         userPidId = rand() % (max - 1);
-    } while (*(shmArrayUsersPidPtr + userPidId) == myPid && *(shmArrayUsersPidPtr + userPidId) != -1);
+    } while (shmArrayUsersPidPtr[userPidId].pid == myPid && shmArrayUsersPidPtr[userPidId].stato != UTENTE_KO);
 
-    return *(shmArrayUsersPidPtr + userPidId);
+    return shmArrayUsersPidPtr[userPidId].pid;
 }
 
 /*
@@ -717,14 +868,15 @@ Alcune assunzioni:
 
 DA CONCORDRE - assegnare al processo terminato -1 oppure un altro valore.
 */
-void updateShmArrayUsersPid(int pidToRemove, int *shmArrayUsersPidPtr, int numUsers)
+void updateShmArrayUsersPid(int pidToRemove, utente *shmArrayUsersPidPtr, int numUsers)
 {
     /*ACCEDO IN MODO ESCLUSIVO ALLA SM - TODO*/
-    for (int i = 0; i < numUsers; i++)
+    int i;
+    for (i = 0; i < numUsers; i++)
     {
-        if (*(shmArrayUsersPidPtr + i) == pidToRemove)
+        if (shmArrayUsersPidPtr[i].pid == pidToRemove)
         {
-            *(shmArrayUsersPidPtr + i) = -1;
+            shmArrayUsersPidPtr[i].stato = UTENTE_KO;
             break;
         }
     }
@@ -737,10 +889,12 @@ Alcune assunzioni:
 1. La memoria condivisa esiste ed e' POPOLATA
 2. max rappresenta il valore di NUM_NODES che al momento della invocazione deve avere un valore valido.
 */
-int getRandomUser(int max, int *shmArrayNodeMsgQueuePtr)
+int getRandomMqId(int max, int *shmArrayNodeMsgQueuePtr)
 {
+    int rIndice;
     srand(getpid());
-    return *(shmArrayNodeMsgQueuePtr + rand() % (max - 1));
+    rIndice = rand() % (max);
+    return shmArrayNodeMsgQueuePtr[rIndice];
 }
 
 /*
@@ -752,12 +906,17 @@ Alcune assunzioni:
 */
 int getMyBilancio(int myPid, transazione *shmLibroMastroPtr, int *index, int max)
 {
+    printf("Calcolo bilancio\n");
     int bilancio = 0;
-    for (index; index < max; index++)
+    for (*index; *index < max; (*index)++)
     {
-        if (((*(shmLibroMastroPtr + *index)).receiver == myPid || (*(shmLibroMastroPtr + *index)).sender == myPid) && (*(shmLibroMastroPtr + *index)).quantita != 0)
+        if((shmLibroMastroPtr[*index]).quantita == 0)
         {
-            bilancio += (*(shmLibroMastroPtr + *index)).receiver;
+            return bilancio;
+        }
+        else if (shmLibroMastroPtr[*index].receiver == myPid)
+        {
+            bilancio += (shmLibroMastroPtr[*index]).receiver;
         }
     }
     return bilancio;
@@ -865,4 +1024,35 @@ void marcaTransazioni(transazione_tp *tp, transazione *b, int tpSize, int bSize)
             }
         }
     }
+}
+
+/*
+Restituisce in modo casuale la quantita di denar da inviare.
+*/
+int getRandomQuantita(int min, int max)
+{
+    int diff;
+    srand(getpid());
+    diff = max - min;
+    return min+rand()%diff;
+}
+
+/*Calcola il reward da pagare al nodo*/
+int getReward(int reward, int quantita)
+{
+    int q;
+    q = quantita * reward / 100;
+    if(q == 0){
+        q = 1;
+    }
+    return 1;
+}
+
+/*
+Funzione handler per segnale SIGUSR1
+*/
+void sigusr1Handler(int sigNum)
+{
+    printf("Handler scattato!\nDEVO FARE LE DETACH\n");
+    exit(EXIT_SUCCESS);
 }
